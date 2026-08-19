@@ -24,7 +24,6 @@ let legalMoves = [];
 let pendingPromotion = null;
 let captured = { w: [], b: [] };
 let selectedOpponent = opponents[0];
-let selectionOpen = true;
 let aiThinking = false;
 let engine = null;
 let engineRequest = null;
@@ -73,7 +72,7 @@ document.querySelector('#app').innerHTML = `
   </main>
 
   <div id="promotion-modal" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal promotion-modal"><span class="eyebrow">PAWN PROMOTION</span><h2>Choose a piece</h2><div id="promotion-options" class="promotion-options"></div></div></div>
-  <div id="game-over" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal"><span class="eyebrow" id="game-over-label">GAME OVER</span><h2 id="game-over-title">DRAW</h2><p id="game-over-opponent"></p><small id="game-over-detail"></small><button id="play-again" type="button">PLAY AGAIN</button></div></div>
+  <div id="game-over" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal result-modal"><span class="eyebrow" id="game-over-label">GAME OVER</span><h2 id="game-over-title">DRAW</h2><p id="game-over-opponent"></p><small id="game-over-detail"></small><div class="result-stats"><div><span>MOVES</span><strong id="result-moves">0</strong></div><div><span>CAPTURES</span><strong id="result-captures">0</strong></div><div><span>OPPONENT</span><strong id="result-opponent">—</strong></div></div><div class="coach-summary"><span>COACH SUMMARY</span><p id="coach-summary-text">Game complete.</p></div><button id="play-again" type="button">PLAY AGAIN</button></div></div>
 `;
 
 const boardEl = document.querySelector('#board');
@@ -451,7 +450,6 @@ function openSelection() {
   disposeAnalysisEngine();
   resetCoach();
   setThinking(false);
-  selectionOpen = true;
   document.querySelector('#selection-view').classList.remove('hidden-view');
   document.querySelector('#game-view').classList.add('hidden-view');
   document.querySelector('.right-panel').classList.add('hidden-view');
@@ -459,7 +457,6 @@ function openSelection() {
 }
 
 function startGame() {
-  selectionOpen = false;
   resetGame();
   renderOpponentDetails();
   document.querySelector('#selection-view').classList.add('hidden-view');
@@ -570,6 +567,15 @@ function showGameOver(result, detail) {
   document.querySelector('#game-over-title').textContent = result;
   document.querySelector('#game-over-opponent').textContent = `Against ${selectedOpponent.name}`;
   document.querySelector('#game-over-detail').textContent = detail;
+  document.querySelector('#result-moves').textContent = String(game.history().length);
+  document.querySelector('#result-captures').textContent = String(captured.w.length + captured.b.length);
+  document.querySelector('#result-opponent').textContent = selectedOpponent.difficulty;
+  const coachText = document.querySelector('#coach-explanation').textContent.trim();
+  document.querySelector('#coach-summary-text').textContent = coachText && !coachText.includes('analyzing')
+    ? coachText
+    : 'Game complete. Review the move history and try a fresh approach next game.';
+  coachSequence += 1;
+  disposeAnalysisEngine();
   gameOverModal.classList.remove('hidden');
   document.querySelector('#play-again').focus();
 }
