@@ -1,4 +1,4 @@
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const MAX_BODY_SIZE = 12000;
 
 function sendJson(response, status, body) {
@@ -27,12 +27,26 @@ export async function handleCoachRequest(request, response, apiKey = process.env
   }
 
   if (!apiKey) {
+    if (request.method === 'POST') {
+      try {
+        const fallback = await readJson(request);
+        if (fallback.requestType === 'playerQuestion') {
+          sendJson(response, 200, { explanation: `Stockfish recommends ${fallback.betterMoveSan || 'a developing move'} in this position. Focus on checks, captures, threats, and king safety before choosing your move.` });
+          return;
+        }
+      } catch { /* fall through to unavailable response */ }
+    }
     sendJson(response, 503, { message: 'Coach temporarily unavailable.' });
     return;
   }
 
+  let analysis;
   try {
-    const analysis = await readJson(request);
+    analysis = await readJson(request);
+    if (analysis.requestType === 'playerQuestion' && (typeof analysis.question !== 'string' || analysis.question.trim().length > 180)) {
+      sendJson(response, 400, { message: 'Invalid coach question.' });
+      return;
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const prompt = {
@@ -73,6 +87,10 @@ export async function handleCoachRequest(request, response, apiKey = process.env
   } catch (error) {
     if (error?.name === 'AbortError') console.error('[AI Coach] Gemini request timed out.');
     else if (error?.message !== 'Gemini request failed') console.error(`[AI Coach] ${error?.message || 'Unexpected failure'}`);
+    if (analysis?.requestType === 'playerQuestion') {
+      sendJson(response, 200, { explanation: `I could not reach Gemini right now, but Stockfish recommends ${analysis.betterMoveSan || 'a careful developing move'}. Check your opponent's forcing replies before you commit.` });
+      return;
+    }
     sendJson(response, 503, { message: 'Coach temporarily unavailable.' });
   }
 }
