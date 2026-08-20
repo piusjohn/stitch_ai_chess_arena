@@ -1,6 +1,14 @@
 import { Chess } from 'chess.js';
+import { createClient } from '@supabase/supabase-js';
 import { classifyMove, normalizeEvaluation, shouldRequestCoach } from './coach-analysis.js';
 import './styles.css';
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
+let currentUser = null;
+let authReady = false;
+let pendingAuthAction = null;
 
 const pieces = {
   wp: '♙', wn: '♘', wb: '♗', wr: '♖', wq: '♕', wk: '♔',
@@ -36,22 +44,50 @@ let analysisRequest = null;
 let analysisQueue = Promise.resolve();
 let coachSequence = 0;
 let coachHighlight = [];
+let gameStartedAt = null;
+let gameSaved = false;
 const engineConfig = { beginner: { depth: 3, skill: 1 }, strategist: { depth: 7, skill: 8 }, grandmaster: { depth: 10, skill: 18 } };
 const ENGINE_READY_TIMEOUT = 12000;
 const ENGINE_MOVE_TIMEOUT = 20000;
 
 document.querySelector('#app').innerHTML = `
+  <section id="auth-view" class="auth-view hidden-view">
+    <div class="auth-panel">
+      <div class="brand auth-brand"><span class="brand-mark">♙</span><div><h1>AI Chess Arena</h1><p>Grandmaster Level</p></div></div>
+      <div id="auth-login-panel">
+        <span class="eyebrow">WELCOME BACK</span><h2>Log in to play</h2>
+        <form id="login-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" minlength="6" required></label><button id="forgot-password" class="auth-link" type="button">Forgot password?</button><p id="login-error" class="auth-error" role="alert"></p><button class="primary-action" type="submit">LOGIN</button><div class="auth-divider"><span>OR</span></div><button id="google-login" class="secondary-action" type="button"><span aria-hidden="true">G</span> CONTINUE WITH GOOGLE</button></form>
+        <p class="auth-switch">Don't have an account? <button id="show-signup" type="button">Sign up</button></p>
+      </div>
+      <div id="auth-signup-panel" class="hidden-view">
+        <span class="eyebrow">JOIN THE ARENA</span><h2>Create your account</h2>
+        <form id="signup-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="new-password" minlength="6" required></label><label>Confirm password<input name="confirmPassword" type="password" autocomplete="new-password" minlength="6" required></label><p id="signup-error" class="auth-error" role="alert"></p><button class="primary-action" type="submit">CREATE ACCOUNT</button></form>
+        <button id="google-signup" class="secondary-action" type="button"><span aria-hidden="true">G</span> CONTINUE WITH GOOGLE</button><p class="auth-switch">Already have an account? <button id="show-login" type="button">Log in</button></p>
+      </div>
+      <div id="auth-reset-panel" class="hidden-view">
+        <span class="eyebrow">ACCOUNT RECOVERY</span><h2>Reset your password</h2>
+        <form id="reset-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><p id="reset-request-message" class="auth-error" role="alert"></p><button class="primary-action" type="submit">SEND RESET LINK</button></form>
+        <form id="update-password-form" class="auth-form hidden-view"><label>New password<input name="password" type="password" autocomplete="new-password" minlength="6" required></label><label>Confirm password<input name="confirmPassword" type="password" autocomplete="new-password" minlength="6" required></label><p id="reset-update-message" class="auth-error" role="alert"></p><button class="primary-action" type="submit">UPDATE PASSWORD</button></form>
+        <p class="auth-switch"><button id="back-to-login" type="button">Back to log in</button></p>
+      </div>
+    </div>
+  </section>
   <main class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">♙</span><div><h1>AI Arena</h1><p>Grandmaster Level</p></div></div>
       <nav>${nav.map(([icon, label, active]) => `<button class="nav-item ${active ? 'active' : ''}" type="button"><span>${icon}</span>${label}</button>`).join('')}</nav>
-      <button class="nav-item profile" type="button"><span>◎</span>Profile</button>
+      <button id="logout" class="nav-item profile" type="button"><span>↪</span>Log out</button>
     </aside>
 
     <section id="selection-view" class="selection-view">
       <header class="selection-heading"><span>CHOOSE YOUR OPPONENT</span><h2>Who will you face?</h2><p>Select an opponent to begin your match.</p></header>
       <div id="opponent-list" class="opponent-list"></div>
       <button id="start-game" class="primary-action" type="button">PLAY <span>→</span></button>
+    </section>
+
+    <section id="utility-view" class="utility-view hidden-view">
+      <header class="selection-heading"><span id="utility-eyebrow">TRAINING</span><h2 id="utility-title">Training drills</h2><p id="utility-description">Practice with focused positions and review your progress.</p></header>
+      <div id="utility-content" class="utility-content"></div>
     </section>
 
     <section id="game-view" class="game-area hidden-view">
@@ -72,7 +108,7 @@ document.querySelector('#app').innerHTML = `
   </main>
 
   <div id="promotion-modal" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal promotion-modal"><span class="eyebrow">PAWN PROMOTION</span><h2>Choose a piece</h2><div id="promotion-options" class="promotion-options"></div></div></div>
-  <div id="game-over" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal result-modal"><span class="eyebrow" id="game-over-label">GAME OVER</span><h2 id="game-over-title">DRAW</h2><p id="game-over-opponent"></p><small id="game-over-detail"></small><div class="result-stats"><div><span>MOVES</span><strong id="result-moves">0</strong></div><div><span>CAPTURES</span><strong id="result-captures">0</strong></div><div><span>OPPONENT</span><strong id="result-opponent">—</strong></div></div><div class="coach-summary"><span>COACH SUMMARY</span><p id="coach-summary-text">Game complete.</p></div><button id="play-again" type="button">PLAY AGAIN</button></div></div>
+  <div id="game-over" class="overlay hidden" role="dialog" aria-modal="true"><div class="modal result-modal"><span class="eyebrow" id="game-over-label">GAME OVER</span><h2 id="game-over-title">DRAW</h2><p id="game-over-opponent"></p><small id="game-over-detail"></small><div class="result-stats"><div><span>MOVES</span><strong id="result-moves">0</strong></div><div><span>CAPTURES</span><strong id="result-captures">0</strong></div><div><span>OPPONENT</span><strong id="result-opponent">—</strong></div></div><div class="coach-summary"><span>COACH SUMMARY</span><p id="coach-summary-text">Game complete.</p></div><p id="save-status" class="save-status" role="status"></p><button id="play-again" type="button">PLAY AGAIN</button></div></div>
 `;
 
 const boardEl = document.querySelector('#board');
@@ -402,8 +438,10 @@ function analyzePlayerMove({ beforeFen, afterFen, move, history, session }) {
   const sequence = ++coachSequence;
   setCoachLoading(sequence);
   analysisQueue = analysisQueue.then(async () => {
-    const before = await analyzePosition(beforeFen);
-    const after = await analyzePosition(afterFen);
+    const [before, after] = await Promise.all([
+      analyzePosition(beforeFen),
+      analyzePosition(afterFen),
+    ]);
     if (!before.score || !after.score || session !== gameSession || sequence !== coachSequence) return;
     const beforeEvaluation = normalizeEvaluation(before.score, 'w');
     const afterEvaluation = normalizeEvaluation(after.score, 'b');
@@ -451,17 +489,147 @@ function openSelection() {
   resetCoach();
   setThinking(false);
   document.querySelector('#selection-view').classList.remove('hidden-view');
+  document.querySelector('#utility-view').classList.add('hidden-view');
   document.querySelector('#game-view').classList.add('hidden-view');
   document.querySelector('.right-panel').classList.add('hidden-view');
   renderOpponents();
 }
 
+async function showUtilityView(kind) {
+  document.querySelector('#selection-view').classList.add('hidden-view');
+  document.querySelector('#game-view').classList.add('hidden-view');
+  document.querySelector('.right-panel').classList.add('hidden-view');
+  const view = document.querySelector('#utility-view');
+  view.classList.remove('hidden-view');
+  const titles = {
+    training: ['TRAINING', 'Training drills', 'Practice with focused positions and review your progress.'],
+    history: ['HISTORY', 'Your games', 'Completed matches saved to your account.'],
+    leaderboard: ['LEADERBOARD', 'Arena leaderboard', 'Your completed games and results.'],
+    settings: ['SETTINGS', 'Account settings', 'Manage your session and app preferences.'],
+  };
+  const [eyebrow, title, description] = titles[kind];
+  document.querySelector('#utility-eyebrow').textContent = eyebrow;
+  document.querySelector('#utility-title').textContent = title;
+  document.querySelector('#utility-description').textContent = description;
+  const content = document.querySelector('#utility-content');
+  if (kind === 'training') {
+    content.innerHTML = '<div class="utility-grid"><button class="utility-card" data-training="beginner"><strong>TACTICS WARM-UP</strong><span>Play against The Beginner and build confidence.</span></button><button class="utility-card" data-training="grandmaster"><strong>DEEP CALCULATION</strong><span>Challenge The Grandmaster with precise moves.</span></button></div>';
+    content.querySelectorAll('[data-training]').forEach(button => button.addEventListener('click', () => { selectedOpponent = opponents.find(item => item.id === button.dataset.training); startGame(); }));
+  } else if (kind === 'settings') {
+    content.innerHTML = `<div class="utility-card"><strong>ACCOUNT</strong><span>${currentUser?.email || 'Not signed in'}</span><button id="settings-logout" class="text-action" type="button">LOG OUT</button></div>`;
+    content.querySelector('#settings-logout').addEventListener('click', () => document.querySelector('#logout').click());
+  } else {
+    content.innerHTML = '<p class="utility-loading">Loading your games...</p>';
+    if (!supabase || !currentUser) { content.innerHTML = '<p class="utility-empty">Log in to see saved games.</p>'; return; }
+    const { data, error } = await supabase.from('games').select('opponent_name, opponent_difficulty, result, move_count, completed_at').order('completed_at', { ascending: false }).limit(25);
+    if (error) { content.innerHTML = '<p class="utility-empty">Games could not be loaded right now.</p>'; return; }
+    if (!data?.length) { content.innerHTML = '<p class="utility-empty">No completed games yet. Start a match to build your record.</p>'; return; }
+    const rows = data.map((game, index) => `<div class="utility-row"><span>${index + 1}</span><strong>${game.opponent_name}</strong><span>${game.result}</span><span>${game.move_count} moves</span><small>${new Date(game.completed_at).toLocaleDateString()}</small></div>`).join('');
+    content.innerHTML = `<div class="utility-list">${rows}</div>`;
+  }
+}
+
+function setActiveNav(index) {
+  document.querySelectorAll('.sidebar nav .nav-item').forEach((item, itemIndex) => item.classList.toggle('active', itemIndex === index));
+}
+
 function startGame() {
+  if (!currentUser) {
+    pendingAuthAction = 'start-game';
+    showAuth('login');
+    return;
+  }
   resetGame();
   renderOpponentDetails();
+  document.querySelector('#utility-view').classList.add('hidden-view');
   document.querySelector('#selection-view').classList.add('hidden-view');
   document.querySelector('#game-view').classList.remove('hidden-view');
   document.querySelector('.right-panel').classList.remove('hidden-view');
+}
+
+async function saveCompletedGame(result, detail) {
+  if (gameSaved || !supabase || !currentUser) return;
+  gameSaved = true;
+  const saveStatus = document.querySelector('#save-status');
+  try {
+    const { error } = await supabase.from('games').insert({
+      opponent_id: selectedOpponent.id,
+      opponent_name: selectedOpponent.name,
+      opponent_difficulty: selectedOpponent.difficulty,
+      result,
+      status: detail,
+      move_count: game.history().length,
+      moves: game.history({ verbose: true }),
+      starting_fen: new Chess().fen(),
+      final_fen: game.fen(),
+      player_accuracy: null,
+      blunders: 0,
+      mistakes: 0,
+      great_moves: 0,
+      started_at: gameStartedAt,
+      completed_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+    saveStatus.textContent = 'Game saved.';
+    saveStatus.classList.remove('save-failed');
+  } catch (error) {
+    gameSaved = false;
+    saveStatus.textContent = 'Game could not be saved. Please try again.';
+    saveStatus.classList.add('save-failed');
+    if (import.meta.env.DEV) console.error('Failed to save completed game', error);
+  }
+}
+
+function showAuth(mode = 'login') {
+  document.querySelector('#auth-view').classList.remove('hidden-view');
+  document.querySelector('.app-shell').classList.add('hidden-view');
+  document.querySelector('#auth-login-panel').classList.toggle('hidden-view', mode !== 'login');
+  document.querySelector('#auth-signup-panel').classList.toggle('hidden-view', mode !== 'signup');
+  document.querySelector('#auth-reset-panel').classList.toggle('hidden-view', mode !== 'reset');
+}
+
+function showApp() {
+  document.querySelector('#auth-view').classList.add('hidden-view');
+  document.querySelector('.app-shell').classList.remove('hidden-view');
+}
+
+function authError(error) {
+  const message = error?.message || 'Authentication failed. Please try again.';
+  return message.toLowerCase().includes('invalid login credentials') ? 'Incorrect email or password.' : message;
+}
+
+async function initializeAuth() {
+  const isRecovery = window.location.hash.includes('type=recovery');
+  if (!supabase) {
+    authReady = true;
+    showAuth('login');
+    document.querySelector('#login-error').textContent = 'Authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.';
+    return;
+  }
+  const { data } = await supabase.auth.getSession();
+  currentUser = data.session?.user || null;
+  authReady = true;
+  if (isRecovery) {
+    showAuth('reset');
+    document.querySelector('#reset-form').classList.add('hidden-view');
+    document.querySelector('#update-password-form').classList.remove('hidden-view');
+  } else if (currentUser) {
+    showApp();
+    if (pendingAuthAction === 'start-game') { pendingAuthAction = null; startGame(); }
+  } else {
+    showAuth('login');
+  }
+  supabase.auth.onAuthStateChange((_event, session) => {
+    currentUser = session?.user || null;
+    if (!currentUser) {
+      pendingAuthAction = null;
+      openSelection();
+      showAuth('login');
+    } else {
+      showApp();
+      if (pendingAuthAction === 'start-game') { pendingAuthAction = null; startGame(); }
+    }
+  });
 }
 
 function render() {
@@ -561,6 +729,7 @@ function drawReason() {
 }
 
 function showGameOver(result, detail) {
+  if (gameResult) return;
   gameResult = result;
   setThinking(false);
   disposeEngine();
@@ -577,6 +746,7 @@ function showGameOver(result, detail) {
   coachSequence += 1;
   disposeAnalysisEngine();
   gameOverModal.classList.remove('hidden');
+  saveCompletedGame(result, detail);
   document.querySelector('#play-again').focus();
 }
 
@@ -613,8 +783,8 @@ function resetGame() {
   gameSession += 1;
   disposeEngine();
   disposeAnalysisEngine();
-  game = new Chess(); selected = null; legalMoves = []; pendingPromotion = null; captured = { w: [], b: [] }; gameResult = null;
-  promotionModal.classList.add('hidden'); gameOverModal.classList.add('hidden'); document.querySelector('#engine-error').classList.add('hidden-view'); resetCoach(); setThinking(false); initEngine(); render();
+  game = new Chess(); gameStartedAt = new Date().toISOString(); gameSaved = false; selected = null; legalMoves = []; pendingPromotion = null; captured = { w: [], b: [] }; gameResult = null;
+  promotionModal.classList.add('hidden'); gameOverModal.classList.add('hidden'); document.querySelector('#save-status').textContent = ''; document.querySelector('#save-status').classList.remove('save-failed'); document.querySelector('#engine-error').classList.add('hidden-view'); resetCoach(); setThinking(false); initEngine(); render();
 }
 
 document.querySelector('#undo').addEventListener('click', () => {
@@ -645,9 +815,79 @@ document.querySelector('#retry-game').addEventListener('click', resetGame);
 document.querySelector('#play-again').addEventListener('click', () => { resetGame(); renderOpponentDetails(); });
 document.querySelector('#start-game').addEventListener('click', startGame);
 document.querySelector('#change-opponent').addEventListener('click', openSelection);
-document.querySelector('.nav-item:nth-child(1)').addEventListener('click', startGame);
-document.querySelector('.nav-item:nth-child(2)').addEventListener('click', openSelection);
+document.querySelectorAll('.sidebar nav .nav-item').forEach((item, index) => item.addEventListener('click', () => {
+  setActiveNav(index);
+  if (index === 0) startGame();
+  else if (index === 1) { document.querySelector('#utility-view').classList.add('hidden-view'); openSelection(); }
+  else showUtilityView(['training', 'history', 'leaderboard', 'settings'][index - 2]);
+}));
+document.querySelector('#show-signup').addEventListener('click', () => showAuth('signup'));
+document.querySelector('#show-login').addEventListener('click', () => showAuth('login'));
+document.querySelector('#back-to-login').addEventListener('click', () => showAuth('login'));
+document.querySelector('#forgot-password').addEventListener('click', () => showAuth('reset'));
+async function signInWithGoogle() {
+  if (!supabase) {
+    document.querySelector('#login-error').textContent = 'Authentication is not configured. Set Supabase environment variables.';
+    return;
+  }
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: window.location.origin,
+      queryParams: { prompt: 'select_account' },
+    },
+  });
+  if (error) document.querySelector('#login-error').textContent = authError(error);
+}
+document.querySelector('#google-login').addEventListener('click', signInWithGoogle);
+document.querySelector('#google-signup').addEventListener('click', signInWithGoogle);
+document.querySelector('#logout').addEventListener('click', async () => { if (supabase) await supabase.auth.signOut(); else { currentUser = null; openSelection(); } });
+document.querySelector('#login-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget; const errorEl = document.querySelector('#login-error'); errorEl.textContent = '';
+  if (!supabase) { errorEl.textContent = 'Authentication is not configured. Set Supabase environment variables.'; return; }
+  const { error } = await supabase.auth.signInWithPassword({ email: form.email.value.trim(), password: form.password.value });
+  if (error) { errorEl.textContent = authError(error); return; }
+  form.reset();
+});
+document.querySelector('#signup-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget; const errorEl = document.querySelector('#signup-error'); errorEl.textContent = '';
+  if (form.password.value !== form.confirmPassword.value) { errorEl.textContent = 'Passwords do not match.'; return; }
+  if (!supabase) { errorEl.textContent = 'Authentication is not configured. Set Supabase environment variables.'; return; }
+  const { data, error } = await supabase.auth.signUp({ email: form.email.value.trim(), password: form.password.value });
+  if (error) { errorEl.textContent = authError(error); return; }
+  form.reset();
+  if (data.session) {
+    errorEl.textContent = '';
+    return;
+  }
+  if (!data.session) errorEl.textContent = 'Account created. Check your email to confirm your address, then log in.';
+});
+document.querySelector('#reset-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget; const message = document.querySelector('#reset-request-message'); message.textContent = '';
+  if (!supabase) { message.textContent = 'Authentication is not configured.'; return; }
+  const { error } = await supabase.auth.resetPasswordForEmail(form.email.value.trim(), { redirectTo: window.location.origin });
+  message.textContent = error ? authError(error) : 'Check your email for a password reset link.';
+});
+document.querySelector('#update-password-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget; const message = document.querySelector('#reset-update-message'); message.textContent = '';
+  if (form.password.value !== form.confirmPassword.value) { message.textContent = 'Passwords do not match.'; return; }
+  const { error } = await supabase.auth.updateUser({ password: form.password.value });
+  if (error) { message.textContent = authError(error); return; }
+  form.reset(); message.textContent = 'Password updated. You can now log in.';
+  setTimeout(() => showAuth('login'), 1200);
+});
 renderOpponents();
 render();
+initializeAuth();
+
+if (window.location.hash.includes('type=recovery')) {
+  showAuth('reset');
+  document.querySelector('#reset-form').classList.add('hidden-view');
+  document.querySelector('#update-password-form').classList.remove('hidden-view');
+}
 
 export { game, resetGame };

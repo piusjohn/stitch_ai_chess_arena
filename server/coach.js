@@ -34,7 +34,7 @@ export async function handleCoachRequest(request, response, apiKey = process.env
   try {
     const analysis = await readJson(request);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), 15000);
     const prompt = {
       role: 'You are an expert but friendly chess coach for beginners.',
       task: analysis.requestType === 'playerQuestion'
@@ -57,7 +57,7 @@ export async function handleCoachRequest(request, response, apiKey = process.env
       signal: controller.signal,
       body: JSON.stringify({
         contents: [{ parts: [{ text: JSON.stringify(prompt) }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+        generationConfig: { temperature: 0.2, maxOutputTokens: 384 },
       }),
     });
     clearTimeout(timeout);
