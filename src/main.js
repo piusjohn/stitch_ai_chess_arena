@@ -7,8 +7,6 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
 let currentUser = null;
-let authReady = false;
-let pendingAuthAction = null;
 
 const pieces = {
   wp: '♙', wn: '♘', wb: '♗', wr: '♖', wq: '♕', wk: '♔',
@@ -130,32 +128,10 @@ const ENGINE_READY_TIMEOUT = 12000;
 const ENGINE_MOVE_TIMEOUT = 20000;
 
 document.querySelector('#app').innerHTML = `
-  <section id="auth-view" class="auth-view hidden-view">
-    <div class="auth-panel">
-      <div class="brand auth-brand"><span class="brand-mark">♙</span><div><h1>AI Chess Arena</h1><p>Grandmaster Level</p></div></div>
-      <div id="auth-login-panel">
-        <span class="eyebrow">WELCOME BACK</span><h2>Log in to play</h2>
-        <form id="login-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" minlength="6" required></label><button id="forgot-password" class="auth-link" type="button">Forgot password?</button><p id="login-error" class="auth-error" role="alert"></p><button class="primary-action" type="submit">LOGIN</button><div class="auth-divider"><span>OR</span></div><button id="google-login" class="secondary-action" type="button"><span aria-hidden="true">G</span> CONTINUE WITH GOOGLE</button></form>
-        <p class="auth-switch">Don't have an account? <button id="show-signup" type="button">Sign up</button></p>
-      </div>
-      <div id="auth-signup-panel" class="hidden-view">
-        <span class="eyebrow">JOIN THE ARENA</span><h2>Create your account</h2>
-        <form id="signup-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="new-password" minlength="6" required></label><label>Confirm password<input name="confirmPassword" type="password" autocomplete="new-password" minlength="6" required></label><p id="signup-error" class="auth-error" role="alert"></p><button class="primary-action" type="submit">CREATE ACCOUNT</button></form>
-        <button id="google-signup" class="secondary-action" type="button"><span aria-hidden="true">G</span> CONTINUE WITH GOOGLE</button><p class="auth-switch">Already have an account? <button id="show-login" type="button">Log in</button></p>
-      </div>
-      <div id="auth-reset-panel" class="hidden-view">
-        <span class="eyebrow">ACCOUNT RECOVERY</span><h2>Reset your password</h2>
-        <form id="reset-form" class="auth-form"><label>Email<input name="email" type="email" autocomplete="email" required></label><p id="reset-request-message" class="auth-error" role="alert"></p><button class="primary-action" type="submit">SEND RESET LINK</button></form>
-        <form id="update-password-form" class="auth-form hidden-view"><label>New password<input name="password" type="password" autocomplete="new-password" minlength="6" required></label><label>Confirm password<input name="confirmPassword" type="password" autocomplete="new-password" minlength="6" required></label><p id="reset-update-message" class="auth-error" role="alert"></p><button class="primary-action" type="submit">UPDATE PASSWORD</button></form>
-        <p class="auth-switch"><button id="back-to-login" type="button">Back to log in</button></p>
-      </div>
-    </div>
-  </section>
   <main class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">♙</span><div><h1>AI Arena</h1><p>Grandmaster Level</p></div></div>
       <nav>${nav.map(([icon, label, active]) => `<button class="nav-item ${active ? 'active' : ''}" type="button"><span>${icon}</span>${label}</button>`).join('')}</nav>
-      <button id="logout" class="nav-item profile" type="button"><span>↪</span>Log out</button>
     </aside>
 
     <section id="selection-view" class="selection-view">
@@ -630,12 +606,11 @@ async function showUtilityView(kind) {
   } else if (kind === 'settings') {
     const profileKey = `ai-chess-profile:${currentUser?.id || 'guest'}`;
     const profile = JSON.parse(localStorage.getItem(profileKey) || '{}');
-    content.innerHTML = `<div class="utility-card"><strong>PLAYER PROFILE</strong><span>${currentUser?.email || 'Not signed in'}</span><label class="profile-edit">DISPLAY NAME<input id="display-name" value="${profile.displayName || ''}" maxlength="30" placeholder="Chess learner"></label><button id="save-profile" class="primary-action" type="button">SAVE PROFILE</button><button id="settings-logout" class="text-action" type="button">LOG OUT</button></div>`;
+    content.innerHTML = `<div class="utility-card"><strong>PLAYER PROFILE</strong><span>Guest player</span><label class="profile-edit">DISPLAY NAME<input id="display-name" value="${profile.displayName || ''}" maxlength="30" placeholder="Chess learner"></label><button id="save-profile" class="primary-action" type="button">SAVE PROFILE</button></div>`;
     content.querySelector('#save-profile').addEventListener('click', () => { localStorage.setItem(profileKey, JSON.stringify({ displayName: content.querySelector('#display-name').value.trim() })); content.querySelector('#save-profile').textContent = 'SAVED'; });
-    content.querySelector('#settings-logout').addEventListener('click', () => document.querySelector('#logout').click());
   } else {
     content.innerHTML = '<p class="utility-loading">Loading your games...</p>';
-    if (!supabase || !currentUser) { content.innerHTML = '<p class="utility-empty">Log in to see saved games.</p>'; return; }
+    if (!supabase || !currentUser) { content.innerHTML = '<p class="utility-empty">Saved games are unavailable in guest mode.</p>'; return; }
     const { data, error } = await supabase.from('games').select('opponent_name, opponent_difficulty, result, move_count, moves, mistakes, blunders, player_accuracy, completed_at').order('completed_at', { ascending: false }).limit(25);
     if (error) { content.innerHTML = '<p class="utility-empty">Games could not be loaded right now.</p>'; return; }
     if (!data?.length) { content.innerHTML = '<p class="utility-empty">No completed games yet. Start a match to build your record.</p>'; return; }
@@ -802,11 +777,6 @@ function renderProgress(games) {
 }
 
 function startGame() {
-  if (!currentUser) {
-    pendingAuthAction = 'start-game';
-    showAuth('login');
-    return;
-  }
   resetGame();
   renderOpponentDetails();
   document.querySelector('#utility-view').classList.add('hidden-view');
@@ -853,16 +823,7 @@ async function saveCompletedGame(result, detail) {
   }
 }
 
-function showAuth(mode = 'login') {
-  document.querySelector('#auth-view').classList.remove('hidden-view');
-  document.querySelector('.app-shell').classList.add('hidden-view');
-  document.querySelector('#auth-login-panel').classList.toggle('hidden-view', mode !== 'login');
-  document.querySelector('#auth-signup-panel').classList.toggle('hidden-view', mode !== 'signup');
-  document.querySelector('#auth-reset-panel').classList.toggle('hidden-view', mode !== 'reset');
-}
-
 function showApp() {
-  document.querySelector('#auth-view').classList.add('hidden-view');
   document.querySelector('.app-shell').classList.remove('hidden-view');
   if (currentUser && !localStorage.getItem(`ai-chess-onboarded:${currentUser.id}`) && !document.querySelector('#onboarding')) {
     const onboarding = document.createElement('div');
@@ -874,43 +835,8 @@ function showApp() {
   }
 }
 
-function authError(error) {
-  const message = error?.message || 'Authentication failed. Please try again.';
-  return message.toLowerCase().includes('invalid login credentials') ? 'Incorrect email or password.' : message;
-}
-
-async function initializeAuth() {
-  const isRecovery = window.location.hash.includes('type=recovery');
-  if (!supabase) {
-    authReady = true;
-    showAuth('login');
-    document.querySelector('#login-error').textContent = 'Authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.';
-    return;
-  }
-  const { data } = await supabase.auth.getSession();
-  currentUser = data.session?.user || null;
-  authReady = true;
-  if (isRecovery) {
-    showAuth('reset');
-    document.querySelector('#reset-form').classList.add('hidden-view');
-    document.querySelector('#update-password-form').classList.remove('hidden-view');
-  } else if (currentUser) {
-    showApp();
-    if (pendingAuthAction === 'start-game') { pendingAuthAction = null; startGame(); }
-  } else {
-    showAuth('login');
-  }
-  supabase.auth.onAuthStateChange((_event, session) => {
-    currentUser = session?.user || null;
-    if (!currentUser) {
-      pendingAuthAction = null;
-      openSelection();
-      showAuth('login');
-    } else {
-      showApp();
-      if (pendingAuthAction === 'start-game') { pendingAuthAction = null; startGame(); }
-    }
-  });
+function initializeAuth() {
+  showApp();
 }
 
 function render() {
@@ -1186,73 +1112,8 @@ document.querySelectorAll('.sidebar nav .nav-item').forEach((item, index) => ite
   else if (index === 1) { document.querySelector('#utility-view').classList.add('hidden-view'); openSelection(); }
   else showUtilityView(['learn', 'training', 'history', 'settings'][index - 2]);
 }));
-document.querySelector('#show-signup').addEventListener('click', () => showAuth('signup'));
-document.querySelector('#show-login').addEventListener('click', () => showAuth('login'));
-document.querySelector('#back-to-login').addEventListener('click', () => showAuth('login'));
-document.querySelector('#forgot-password').addEventListener('click', () => showAuth('reset'));
-async function signInWithGoogle() {
-  if (!supabase) {
-    document.querySelector('#login-error').textContent = 'Authentication is not configured. Set Supabase environment variables.';
-    return;
-  }
-  const { error } = await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: {
-      redirectTo: window.location.origin,
-      queryParams: { prompt: 'select_account' },
-    },
-  });
-  if (error) document.querySelector('#login-error').textContent = authError(error);
-}
-document.querySelector('#google-login').addEventListener('click', signInWithGoogle);
-document.querySelector('#google-signup').addEventListener('click', signInWithGoogle);
-document.querySelector('#logout').addEventListener('click', async () => { if (supabase) await supabase.auth.signOut(); else { currentUser = null; openSelection(); } });
-document.querySelector('#login-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = event.currentTarget; const errorEl = document.querySelector('#login-error'); errorEl.textContent = '';
-  if (!supabase) { errorEl.textContent = 'Authentication is not configured. Set Supabase environment variables.'; return; }
-  const { error } = await supabase.auth.signInWithPassword({ email: form.email.value.trim(), password: form.password.value });
-  if (error) { errorEl.textContent = authError(error); return; }
-  form.reset();
-});
-document.querySelector('#signup-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = event.currentTarget; const errorEl = document.querySelector('#signup-error'); errorEl.textContent = '';
-  if (form.password.value !== form.confirmPassword.value) { errorEl.textContent = 'Passwords do not match.'; return; }
-  if (!supabase) { errorEl.textContent = 'Authentication is not configured. Set Supabase environment variables.'; return; }
-  const { data, error } = await supabase.auth.signUp({ email: form.email.value.trim(), password: form.password.value });
-  if (error) { errorEl.textContent = authError(error); return; }
-  form.reset();
-  if (data.session) {
-    errorEl.textContent = '';
-    return;
-  }
-  if (!data.session) errorEl.textContent = 'Account created. Check your email to confirm your address, then log in.';
-});
-document.querySelector('#reset-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = event.currentTarget; const message = document.querySelector('#reset-request-message'); message.textContent = '';
-  if (!supabase) { message.textContent = 'Authentication is not configured.'; return; }
-  const { error } = await supabase.auth.resetPasswordForEmail(form.email.value.trim(), { redirectTo: window.location.origin });
-  message.textContent = error ? authError(error) : 'Check your email for a password reset link.';
-});
-document.querySelector('#update-password-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const form = event.currentTarget; const message = document.querySelector('#reset-update-message'); message.textContent = '';
-  if (form.password.value !== form.confirmPassword.value) { message.textContent = 'Passwords do not match.'; return; }
-  const { error } = await supabase.auth.updateUser({ password: form.password.value });
-  if (error) { message.textContent = authError(error); return; }
-  form.reset(); message.textContent = 'Password updated. You can now log in.';
-  setTimeout(() => showAuth('login'), 1200);
-});
 renderOpponents();
 render();
 initializeAuth();
-
-if (window.location.hash.includes('type=recovery')) {
-  showAuth('reset');
-  document.querySelector('#reset-form').classList.add('hidden-view');
-  document.querySelector('#update-password-form').classList.remove('hidden-view');
-}
 
 export { game, resetGame };
